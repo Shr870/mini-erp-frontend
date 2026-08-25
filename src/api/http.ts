@@ -89,6 +89,9 @@ export async function apiRequest<T>(path: string, opts: RequestOpts = {}): Promi
   if (!res.ok) {
     const body = (parsed ?? {}) as Record<string, unknown>
     const { error, detail, ...rest } = body
+    if (res.status === 401 && opts.token) {
+      window.dispatchEvent(new Event('nw-ops:unauthorized'))
+    }
     throw new ApiError(
       res.status,
       String(error ?? 'error'),

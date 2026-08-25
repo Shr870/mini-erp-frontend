@@ -19,6 +19,9 @@ export function when(iso: string | null | undefined): string {
   return d.toLocaleString('en-IN', { hour12: false })
 }
 
-export function num(value: string | number | null | undefined): number {
-  return Number(value) || 0
+export function skuOf(
+  products: Array<{ id: string; sku: string }> | undefined,
+  id: string,
+): string {
+  return products?.find((p) => p.id === id)?.sku ?? id.slice(0, 8)
 }

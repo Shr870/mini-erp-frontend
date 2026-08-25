@@ -46,8 +46,8 @@ async function main() {
   const forbiddenRecon = await req('/ledger/reconciliation', { token: sales })
   assert(forbiddenRecon.status === 403, `sales recon should 403, got ${forbiddenRecon.status}`)
 
-  const inv0 = await req(`/inventory?warehouse_id=${WH}`, { token: warehouse })
-  assert(inv0.status === 200, 'inventory snapshot')
+  const stock0 = await req(`/products/${SKU}/stock?warehouse_id=${WH}`, { token: warehouse })
+  assert(stock0.status === 200, 'stock')
 
   const po = await req('/purchase-orders', {
     token: proc,

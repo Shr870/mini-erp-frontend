@@ -6,7 +6,7 @@ import type { LoginResponse, ProductStock } from '../api/types.ts'
 import { useAuth } from '../auth/AuthContext.tsx'
 import { canPost, POST } from '../auth/rbac.ts'
 import { BusyButton, EmptyState, ErrorBanner, LoadingState, StatusBadge } from '../components/Ui.tsx'
-import { inr, qty, when } from '../lib/format.ts'
+import { inr, qty, skuOf, when } from '../lib/format.ts'
 import { useIdempotencyKey } from '../lib/idempotency.ts'
 
 export function SalesPage() {
@@ -147,7 +147,7 @@ export function SalesPage() {
                 <tbody>
                   {(detailQ.data.lines ?? []).map((line) => (
                     <tr key={line.id}>
-                      <td className="mono">{line.product_id.slice(0, 8)}</td>
+                      <td className="mono">{skuOf(productsQ.data?.products, line.product_id)}</td>
                       <td className="num">{qty(line.ordered_qty ?? line.quantity)}</td>
                       <td className="num">{qty(line.reserved_qty)}</td>
                       <td className="num">{qty(line.fulfilled_qty)}</td>
@@ -203,6 +203,7 @@ function CreateSO({
     enabled: Boolean(token && pid && warehouseId),
     staleTime: 0,
     refetchOnWindowFocus: true,
+    refetchOnMount: 'always',
   })
 
   const payload = useMemo(
@@ -315,8 +316,10 @@ function LiveAvailability({
         </button>
       </div>
       <p className="muted">
-        GET /products/:id/stock · fetched {stockQ.dataUpdatedAt ? new Date(stockQ.dataUpdatedAt).toLocaleTimeString() : '—'}
-        {stockQ.isFetching ? ' · fetching…' : ''}
+        GET /products/:id/stock · fetched{' '}
+        {stockQ.dataUpdatedAt ? new Date(stockQ.dataUpdatedAt).toLocaleTimeString() : '—'}
+        {stockQ.isFetching ? ' · fetching…' : ''}. A second browser window that reserves this SKU will show here after
+        you focus this tab or click Revalidate — not a local decrement.
       </p>
       {stockQ.isError ? <ErrorBanner err={stockQ.error} onRetry={() => void stockQ.refetch()} /> : null}
       {stockQ.data ? (
@@ -388,8 +391,8 @@ function SecondSession({
     <details className="second-session">
       <summary>Second session (concurrent reservation)</summary>
       <p className="muted">
-        Separate JWT. Reserving 1 × {sku ?? 'SKU'} here hits POST /sales-orders as this user. Then click Revalidate on
-        session A — available must drop. Not a local decrement.
+        Separate JWT. Reserving 1 × {sku ?? 'SKU'} here hits POST /sales-orders as this user. Then Revalidate on
+        session A — or use a second browser window as sales and focus this tab. Not a local decrement.
       </p>
       {loginErr ? <ErrorBanner err={loginErr} /> : null}
       {!session ? (

@@ -23,12 +23,28 @@ export function WarehousePage() {
 
   const activeWh = warehouseId || whQ.data?.warehouses[0]?.id || ''
 
+  const productsQ = useQuery({
+    queryKey: ['products', token],
+    queryFn: () => api.products({ token }),
+    enabled: Boolean(token),
+  })
+
   const invQ = useQuery({
-    queryKey: ['inventory', token, activeWh],
-    queryFn: () => api.inventory({ token }, activeWh),
-    enabled: Boolean(token && activeWh),
+    queryKey: ['inventory', token, activeWh, productsQ.data?.products.map((p) => p.id).join(',')],
+    queryFn: async () => {
+      const products = productsQ.data!.products
+      const rows = await Promise.all(
+        products.map(async (p) => {
+          const stock = await api.stock({ token }, p.id, activeWh)
+          return { ...p, ...stock }
+        }),
+      )
+      return { warehouse_id: activeWh, rows }
+    },
+    enabled: Boolean(token && activeWh && productsQ.data),
     staleTime: 0,
     refetchOnWindowFocus: true,
+    refetchOnMount: 'always',
   })
 
   const movQ = useQuery({
@@ -49,7 +65,7 @@ export function WarehousePage() {
         <div>
           <h1>Warehouse</h1>
           <p className="muted">
-            Grid is <code>GET /inventory?warehouse_id=</code> (loops Stage 2 <code>getProductStock</code>).
+            Grid is <code>GET /products</code> then <code>GET /products/:id/stock</code> per SKU (original Stage 2).
             History is <code>GET /stock-movements</code>. Reload refetches; nothing is cached as truth.
           </p>
         </div>
@@ -72,6 +88,7 @@ export function WarehousePage() {
       </header>
 
       {whQ.error ? <ErrorBanner err={whQ.error} onRetry={() => void whQ.refetch()} /> : null}
+      {productsQ.error ? <ErrorBanner err={productsQ.error} onRetry={() => void productsQ.refetch()} /> : null}
       {invQ.error ? <ErrorBanner err={invQ.error} onRetry={() => void invQ.refetch()} /> : null}
       {invQ.isLoading ? <LoadingState label="Loading stock from API…" /> : null}
 

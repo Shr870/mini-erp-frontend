@@ -1,64 +1,75 @@
 # Mini-ERP Frontend — Operations Console (notes)
 
-Repos: https://github.com/Shr870/mini-erp-frontend (console) against https://github.com/Shr870/mini-erp-backend (Stage 2, `:3100`). Vite proxies `/api` → Stage 2. Seed password `password123`.
+Repos: https://github.com/Shr870/mini-erp-frontend (console) · https://github.com/Shr870/mini-erp-backend (Stage 2 API, `:3100`).  
+Stack: Vite + React + TypeScript + React Query. Vite proxies `/api` → Stage 2. Seed password `password123`.
 
 ## Approach
 
-I did not design a fourth CRUD app. I mapped every screen to an existing Stage 2 route, then filled only the holes that made “reload = backend state” impossible.
+I treated the already-running Stage 2 API as the contract, not the written brief and not a mock. Order of work:
 
-Stage 2 already had JWT login, `requireRoles`, `GET /products/:id/stock`, PO/SO GET-by-id, GR 422 `over_receipt`, SO 409 `insufficient_stock` with `extra.available`, and `GET /ledger/reconciliation` (`reconciled`, `derivation.movement_carrying_value`, `ledger_inventory_1300`, `formula`). What it did **not** have: list POs/SOs/journals, movement history, CORS, or a warehouse snapshot. Stashing UUIDs in `localStorage` would fake a console. So I added **read-only** GETs that select existing tables / loop `getProductStock`. Writes, lock path, 409/422 codes, recon formula, and role lists are unchanged. CORS `origin: true` is for split origin; the console uses the proxy.
+1. Read every Stage 2 route, `requireRoles` list, and error code (`403 forbidden`, `409 insufficient_stock` with `extra.available`, `422 over_receipt`, recon `{ reconciled, derivation, formula }`).
+2. Map each console view to those routes. Anything the UI would have to invent (fake stock, fake YES/NO recon, IDs kept only in `localStorage`) was rejected.
+3. Fill only the Stage 2 holes that made “reload = backend state” impossible: read-only list/history GETs + CORS. Warehouse levels stay on original `GET /products/:id/stock`. Writes, locks, 409/422, recon formula, and role lists stayed as shipped.
+4. Build the operator console as a thin client: `apiRequest` + `ApiError`, React Query `staleTime: 0`, RBAC copied from `requireRoles`.
+5. Prove it against live Postgres/API: unit tests for the RBAC matrix and error mapping, `scripts/operator-flow.mjs` for GR/409/recon, browser login as sales vs warehouse vs finance.
 
-Stack: Vite + React + TS + React Query (`staleTime: 0`, refetch on focus, no 4xx retry). No mock service worker. Token in `localStorage` is the session only.
+Underspecified spots are in `ASSUMPTIONS.md` rather than silent.
 
-## Views → Stage 2
+## Key decisions
 
-| View | Reads | Writes |
-|------|--------|--------|
-| Warehouse | `GET /inventory?warehouse_id=`, `GET /stock-movements` | `POST /inventory-adjustments` (finance) |
-| Procurement | `GET /purchase-orders`, `GET /purchase-orders/:id` (`outstanding_qty`, `goods_receipts`) | `POST /purchase-orders` (procurement), `…/approve` (approver), `…/goods-receipts` (warehouse, Idempotency-Key) |
-| Sales | `GET /products/:id/stock` (live avail), `GET /sales-orders`, `GET /sales-orders/:id` (ordered/reserved/fulfilled/backordered + reservation_status) | `POST /sales-orders` (sales), `…/fulfill` (warehouse), `…/cancel` (sales) |
-| Finance | `GET /ledger/reconciliation`, `GET /ledger/journal-entries`, `GET …/:id` | `POST …/reverse` (finance) |
+### 1. Stage 2 is authoritative; the UI does not own business state
 
-Reload refetches those GETs. Mutation responses are backend JSON; lists invalidate and refetch.
+I rejected mocks, hard-coded SKUs/ledger figures, and optimistic inventory presented as truth. After a full page reload, lists and stock come from GET. `localStorage` holds only the JWT session (`nw-ops.session`), not documents. Mutation responses are backend JSON; lists invalidate and refetch. That is the only way the console can survive “another operator just reserved the last unit.”
 
-## Live availability / concurrency
+### 2. Additive list/history GETs; stock levels stay on the original Stage 2 stock route
 
-Available qty on SO create is **only** `GET /products/:id/stock` (physical − active reservations). Timestamp + Revalidate + refetch immediately before POST. The UI does **not** block qty > available: Stage 2 reserves `min(available, ordered)` and sets `backordered_qty`. If available is 0, confirm still POSTs so the operator sees **409 insufficient_stock** with `extra.available` (not a client toast inventing a reject).
+Stage 2 had GET-by-id for POs/SOs/journals and no movement history. A PO list after reload cannot be rebuilt from GET-by-id without stashing UUIDs in the browser. I added read-only `GET /purchase-orders`, `/sales-orders`, `/stock-movements`, `/ledger/journal-entries`. Warehouse **levels** do not use a new snapshot: they `GET /products` then `GET /products/:id/stock` per SKU — the same route Sales uses for live availability. CORS `origin: true` is for split origin; local Vite uses the proxy. No new reserve/GR/recon rules.
 
-“Second session” holds a **second JWT** and POSTs `/sales-orders` as that token, then invalidates `['stock']`. Session A’s next GET shows the drop. `scripts/operator-flow.mjs` against live `:3100`: after reserve, `available_qty === 0`; next SO → 409.
+### 3. Live availability is `GET /products/:id/stock`, not a timer and not a client cap
 
-## RBAC (demo: sales vs warehouse)
+Available = physical − active reservations, computed on the server. The create-SO panel uses that endpoint with `staleTime: 0`, refetch on window focus, an explicit Revalidate, and a refetch immediately before POST. I did **not** disable Confirm when qty > available: Stage 2 partial-reserves `min(available, ordered)` and sets `backordered_qty`. Blocking that in the UI would hide the required Ordered/Available/Backordered behavior. When available is 0, Confirm still POSTs so the operator sees **409 insufficient_stock** with `extra.available` — a client toast would be a fake reject.
 
-Nav/`canPost` copy `requireRoles` plus auditor GET-bypass. Admin is not god-mode.
+### 4. Concurrent reservation is another HTTP session, not a local decrement
 
-Verified in the running console:
-- **sales**: nav Warehouse + Sales. No Procurement/Finance. Topbar: “Recon hidden — this role cannot GET /ledger/reconciliation”. Typing `/finance` still calls recon → **403** `requires one of: finance, auditor, admin`.
-- **warehouse**: nav Warehouse + Procurement + Sales. Cannot create PO (banner + API 403). Can open `PO-0002` and see ordered 10 / received 6 / outstanding 4 and post GR.
-- **finance**: all four views; chip `Ledger matches movements: YES` from recon body (`₹50` = `₹50`, formula string from API).
+Two browser windows as sales share the JWT but not React Query cache. Window B `POST /sales-orders`; window A refetches `GET /products/:id/stock` on focus or Revalidate. An in-page second JWT does the same POST without replacing the signed-in user. `operator-flow.mjs` asserts `available_qty === 0` then 409. Polling every N seconds is not the proof.
 
-Hiding a button is not the control. Routes are not a wall.
+### 5. RBAC copies `requireRoles`; hiding a button is not authorization
 
-## Reconciliation
+`canGet` / `canPost` match the backend lists, including auditor GET-bypass and admin-is-not-god-mode. Demo pair: **sales** vs **warehouse**. Sales nav is Warehouse + Sales; typing `/finance` still calls `GET /ledger/reconciliation` and shows **403** `requires one of: finance, auditor, admin`. Warehouse gets Procurement (GR) + Sales (fulfill) but cannot `POST /purchase-orders`. Routes are not a security wall.
 
-Finance hero + topbar chip render `reconciled`, `derivation.*`, `formula`, `on_failure` from `GET /ledger/reconciliation`. Loading and 403/5xx banners exist. No frontend equality check.
+### 6. Reconciliation is rendered, not computed
 
-## Operator states
+The finance hero and topbar chip bind `reconciled`, `derivation.movement_carrying_value`, `ledger_inventory_1300`, `difference`, and `formula` from `GET /ledger/reconciliation`. I never `===` those numbers in the client. Loading and 403/5xx have their own states. Sales sees “Recon hidden” because that role cannot GET the endpoint.
 
-Loading/empty/error on every list. 401/403/409/422 mapped in `operatorMessage` (incl. over_receipt “outstanding was not changed”). Duplicate submits: `BusyButton` + Idempotency-Key ≤64, rotated on payload change and success. Seed empty stock banner is real (physical 0 until GR/adjust).
+### 7. Duplicate submits follow Stage 2 idempotency
 
-## Assumptions / Stage 2 limits (not faked)
+GR, SO create, fulfill, and adjustments send `Idempotency-Key` (≤64 chars, rotated when the payload identity changes and after success) plus `BusyButton` disabled while in flight. That matches Stage 2’s key+hash replay instead of inventing a frontend-only debounce.
 
-1. List/snapshot/movement GETs are additive reads. See `ASSUMPTIONS.md`.
-2. SO header has no `warehouse_id`; fulfill uses reservation warehouse (now returned on GET SO) or WH1.
-3. Fulfill ships ≤ **active reservation**. Later GRs do not auto-reserve onto an existing backorder; the console shows that instead of a fake fill.
-4. POs &lt; ₹50k auto-approve with `approved_by` NULL (Stage 2).
+### 8. Error bodies are shown as Stage 2 sent them
 
-## Evidence
+`operatorMessage` maps `insufficient_stock`, `over_receipt` (“outstanding was not changed”), `exceeds_reservation`, `forbidden`, `unauthorized`. Extra fields (`available`, `ordered`, `reserved`) are interpolated from the JSON, not guessed.
 
-- Repos: https://github.com/Shr870/mini-erp-frontend · https://github.com/Shr870/mini-erp-backend
-- Backend `npm test` → 7/7 (original six + console read/RBAC lists).
-- Frontend `npm test` → 7; `npm run build` OK.
-- `node scripts/operator-flow.mjs`: sales 403 on PO list + recon; partial GR outstanding 4; 422 over-receipt; live stock drop; 409 over-reserve; recon `reconciled: true`.
-- Browser: sales vs warehouse vs finance surfaces; `/finance` as sales 403; recon YES from endpoint.
+## Reasoning
 
-Run: backend `npm run dev`; frontend `npm run dev` → http://127.0.0.1:5173
+The grading signal is whether the console is exercising Stage 2. Mocked stock or a client-computed recon YES/NO would fail that even if the UI looked complete. List/history GETs exist only because GET-by-id cannot survive a reload; live availability and recon still hit the original Stage 2 routes.
+
+Stage 2 fulfills ≤ active reservation — later GRs do not auto-reserve onto an existing backorder; the console shows that instead of faking a fill. POs under ₹50k auto-approve with `approved_by` NULL. SO header has no `warehouse_id`; fulfill uses the reservation warehouse (returned on GET SO) or seeded WH1.
+
+## What I deliberately did not build
+
+A design system, Redux, WebSockets, optimistic rollback of stock, client-side permission database, or a mock MSW layer. Those would add surface without proving live availability, 409/422, or recon-from-endpoint.
+
+## How to run
+
+```bash
+# backend
+cd /home/user/mini-erp-backend && npm run dev   # :3100
+
+# console
+cd /home/user/mini-erp-frontend && npm run dev   # :5173
+```
+
+```bash
+npm test                  # RBAC matrix + error mapping
+node scripts/operator-flow.mjs   # live GR / 409 / recon against :3100
+```

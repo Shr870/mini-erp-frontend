@@ -13,7 +13,9 @@ const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       staleTime: 0,
+      gcTime: 0,
       refetchOnWindowFocus: true,
+      refetchOnMount: 'always',
       retry: (count, err) => {
         const status = (err as { status?: number }).status
         if (status && status >= 400 && status < 500) return false

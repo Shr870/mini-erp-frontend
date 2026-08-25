@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { apiRequest } from '../api/http.ts'
 import type { AuthUser, LoginResponse } from '../api/types.ts'
 
@@ -45,6 +45,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem(STORAGE)
     setSession(null)
   }, [])
+
+  useEffect(() => {
+    const onUnauthorized = () => logout()
+    window.addEventListener('nw-ops:unauthorized', onUnauthorized)
+    return () => window.removeEventListener('nw-ops:unauthorized', onUnauthorized)
+  }, [logout])
 
   const value = useMemo<AuthState>(
     () => ({

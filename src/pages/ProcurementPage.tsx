@@ -4,7 +4,7 @@ import { api } from '../api/endpoints.ts'
 import { useAuth } from '../auth/AuthContext.tsx'
 import { canPost, POST } from '../auth/rbac.ts'
 import { BusyButton, EmptyState, ErrorBanner, LoadingState, StatusBadge } from '../components/Ui.tsx'
-import { inr, qty, when } from '../lib/format.ts'
+import { inr, qty, skuOf, when } from '../lib/format.ts'
 import { useIdempotencyKey } from '../lib/idempotency.ts'
 
 export function ProcurementPage() {
@@ -194,10 +194,6 @@ export function ProcurementPage() {
       </div>
     </section>
   )
-}
-
-function skuOf(products: Array<{ id: string; sku: string }> | undefined, id: string) {
-  return products?.find((p) => p.id === id)?.sku ?? id.slice(0, 8)
 }
 
 function CreatePO({

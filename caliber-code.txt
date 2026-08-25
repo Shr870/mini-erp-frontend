@@ -1,4 +1,5 @@
-Stage 2 /home/user/mini-erp-backend + console /home/user/mini-erp-frontend. Vite :5173 proxies /api→:3100. No mocks.
+Stage 2 https://github.com/Shr870/mini-erp-backend + console https://github.com/Shr870/mini-erp-frontend
+Vite :5173 proxies /api→:3100. No mocks. Warehouse levels = GET /products + GET /products/:id/stock.
 
 // ===== src/auth/rbac.ts =====
 /** Mirrors Stage 2 `requireRoles` plus the auditor GET-only bypass. Admin is not god-mode. */
@@ -61,7 +62,6 @@ export function firstAllowedPath(roles: string[]): string {
   if (n.finance) return '/finance'
   return '/login'
 }
-
 // ===== src/api/http.ts =====
 export class ApiError extends Error {
   status: number
@@ -154,6 +154,9 @@ export async function apiRequest<T>(path: string, opts: RequestOpts = {}): Promi
   if (!res.ok) {
     const body = (parsed ?? {}) as Record<string, unknown>
     const { error, detail, ...rest } = body
+    if (res.status === 401 && opts.token) {
+      window.dispatchEvent(new Event('nw-ops:unauthorized'))
+    }
     throw new ApiError(
       res.status,
       String(error ?? 'error'),
@@ -242,7 +245,7 @@ export function AppShell() {
     </div>
   )
 }
-// ===== backend src/services/reads.ts =====
+// ===== backend src/services/reads.ts (lists/history only) =====
 import type { Client } from '../db.js';
 import { getProductStock } from './inventory.js';
 
@@ -303,19 +306,30 @@ export async function listJournalEntries(client: Client) {
   );
   return { journal_entries: r.rows };
 }
+// ===== WarehousePage stock grid (original Stage 2 stock GET) =====
+  const productsQ = useQuery({
+    queryKey: ['products', token],
+    queryFn: () => api.products({ token }),
+    enabled: Boolean(token),
+  })
 
-/** Same numbers as GET /products/:id/stock, batched for the warehouse grid. */
-export async function warehouseSnapshot(client: Client, warehouseId: string) {
-  const products = await client.query(
-    `SELECT id, sku, name, unit, is_active FROM products WHERE is_active ORDER BY sku`
-  );
-  const rows = [];
-  for (const p of products.rows) {
-    const stock = await getProductStock(client, p.id, warehouseId);
-    rows.push({ ...p, ...stock });
-  }
-  return { warehouse_id: warehouseId, rows };
-}
+  const invQ = useQuery({
+    queryKey: ['inventory', token, activeWh, productsQ.data?.products.map((p) => p.id).join(',')],
+    queryFn: async () => {
+      const products = productsQ.data!.products
+      const rows = await Promise.all(
+        products.map(async (p) => {
+          const stock = await api.stock({ token }, p.id, activeWh)
+          return { ...p, ...stock }
+        }),
+      )
+      return { warehouse_id: activeWh, rows }
+    },
+    enabled: Boolean(token && activeWh && productsQ.data),
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+    refetchOnMount: 'always',
+  })
 // ===== SalesPage CreateSO (refetch stock then POST) =====
 function CreateSO({
   products,
@@ -339,6 +353,7 @@ function CreateSO({
     enabled: Boolean(token && pid && warehouseId),
     staleTime: 0,
     refetchOnWindowFocus: true,
+    refetchOnMount: 'always',
   })
 
   const payload = useMemo(
@@ -451,8 +466,10 @@ function LiveAvailability({
         </button>
       </div>
       <p className="muted">
-        GET /products/:id/stock · fetched {stockQ.dataUpdatedAt ? new Date(stockQ.dataUpdatedAt).toLocaleTimeString() : '—'}
-        {stockQ.isFetching ? ' · fetching…' : ''}
+        GET /products/:id/stock · fetched{' '}
+        {stockQ.dataUpdatedAt ? new Date(stockQ.dataUpdatedAt).toLocaleTimeString() : '—'}
+        {stockQ.isFetching ? ' · fetching…' : ''}. A second browser window that reserves this SKU will show here after
+        you focus this tab or click Revalidate — not a local decrement.
       </p>
       {stockQ.isError ? <ErrorBanner err={stockQ.error} onRetry={() => void stockQ.refetch()} /> : null}
       {stockQ.data ? (
@@ -475,52 +492,6 @@ function LiveAvailability({
       )}
     </div>
   )
-}
-// ===== SecondSession second JWT =====
-function SecondSession({
-  productId,
-  warehouseId,
-  sku,
-}: {
-  productId: string
-  warehouseId: string
-  sku?: string
-}) {
-  const qc = useQueryClient()
-  const [email, setEmail] = useState('sales@northwind.local')
-  const password = 'password123'
-  const [session, setSession] = useState<LoginResponse | null>(null)
-  const [loginErr, setLoginErr] = useState<unknown>(null)
-  const [loggingIn, setLoggingIn] = useState(false)
-
-  const stockQ = useQuery({
-    queryKey: ['stock-b', session?.token, productId, warehouseId],
-    queryFn: () => api.stock({ token: session!.token }, productId, warehouseId),
-    enabled: Boolean(session && productId && warehouseId),
-    staleTime: 0,
-  })
-
-  const idemp = useIdempotencyKey({ sid: session?.user.id, productId, warehouseId })
-  const reserve = useMutation({
-    mutationFn: () =>
-      api.createSO(
-        { token: session!.token, idempotencyKey: idemp.key },
-        {
-          customer_name: `Session B ${session!.user.email}`,
-          warehouse_id: warehouseId,
-          lines: [{ product_id: productId, quantity: '1', unit_price: '18' }],
-        },
-      ),
-    onSuccess: () => {
-      idemp.rotate()
-      void qc.invalidateQueries({ queryKey: ['stock'] })
-      void qc.invalidateQueries({ queryKey: ['stock-b'] })
-      void qc.invalidateQueries({ queryKey: ['sos'] })
-      void qc.invalidateQueries({ queryKey: ['inventory'] })
-    },
-  })
-
-    // JSX: second JWT login + POST /sales-orders qty=1; invalidates [stock]
 }
 // ===== FinancePage recon indicator =====
 export function FinancePage() {
