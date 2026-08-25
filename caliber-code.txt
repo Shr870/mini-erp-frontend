@@ -1,0 +1,598 @@
+Stage 2 /home/user/mini-erp-backend + console /home/user/mini-erp-frontend. Vite :5173 proxies /api→:3100. No mocks.
+
+// ===== src/auth/rbac.ts =====
+/** Mirrors Stage 2 `requireRoles` plus the auditor GET-only bypass. Admin is not god-mode. */
+
+export const GET_WAREHOUSE = [
+  'sales',
+  'warehouse',
+  'procurement',
+  'finance',
+  'admin',
+  'procurement_approver',
+] as const
+
+export const GET_PROCUREMENT = [
+  'procurement',
+  'procurement_approver',
+  'warehouse',
+  'finance',
+  'admin',
+] as const
+
+export const GET_SALES = ['sales', 'warehouse', 'finance', 'admin'] as const
+
+export const GET_FINANCE = ['finance', 'auditor', 'admin'] as const
+
+export const POST = {
+  createPO: ['procurement'],
+  approvePO: ['procurement_approver'],
+  goodsReceipt: ['warehouse'],
+  adjustStock: ['finance'],
+  createSO: ['sales'],
+  fulfillSO: ['warehouse'],
+  cancelSO: ['sales'],
+  reverseJournal: ['finance'],
+} as const
+
+export function canGet(roles: string[], allowed: readonly string[]): boolean {
+  if (roles.includes('auditor')) return true
+  return allowed.some((r) => roles.includes(r))
+}
+
+export function canPost(roles: string[], allowed: readonly string[]): boolean {
+  return allowed.some((r) => roles.includes(r))
+}
+
+export function navFor(roles: string[]) {
+  return {
+    warehouse: canGet(roles, GET_WAREHOUSE),
+    procurement: canGet(roles, GET_PROCUREMENT),
+    sales: canGet(roles, GET_SALES),
+    finance: canGet(roles, GET_FINANCE),
+  }
+}
+
+export function firstAllowedPath(roles: string[]): string {
+  const n = navFor(roles)
+  if (n.warehouse) return '/warehouse'
+  if (n.procurement) return '/procurement'
+  if (n.sales) return '/sales'
+  if (n.finance) return '/finance'
+  return '/login'
+}
+
+// ===== src/api/http.ts =====
+export class ApiError extends Error {
+  status: number
+  code: string
+  detail?: string
+  extra: Record<string, unknown>
+
+  constructor(
+    status: number,
+    code: string,
+    detail?: string,
+    extra: Record<string, unknown> = {},
+  ) {
+    super(detail || code)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+    this.detail = detail
+    this.extra = extra
+  }
+}
+
+export function isApiError(err: unknown): err is ApiError {
+  return err instanceof ApiError
+}
+
+export function operatorMessage(err: unknown): string {
+  if (!isApiError(err)) {
+    return err instanceof Error ? err.message : 'Unexpected error'
+  }
+  const avail = err.extra.available
+  const ordered = err.extra.ordered
+  const requested = err.extra.requested
+  const reserved = err.extra.reserved
+  switch (err.code) {
+    case 'insufficient_stock':
+      return `Reservation rejected (409 insufficient_stock). Available ${avail ?? '—'}, ordered ${ordered ?? requested ?? '—'}. Backend did not reserve.`
+    case 'over_receipt':
+      return `Goods receipt rejected (422 over_receipt). Quantity exceeds outstanding on the PO line. Outstanding was not changed.`
+    case 'exceeds_reservation':
+      return `Fulfillment rejected (422 exceeds_reservation). Requested ${requested ?? '—'}, reserved ${reserved ?? '—'}.`
+    case 'would_consume_reserved_stock':
+      return `Adjustment rejected (422 would_consume_reserved_stock). Available ${avail ?? '—'}.`
+    case 'forbidden':
+      return `Not permitted (403). ${err.detail ?? 'This role cannot perform that operation; the API is authoritative.'}`
+    case 'unauthorized':
+      return 'Session expired or missing (401). Sign in again.'
+    case 'invalid_credentials':
+      return 'Email or password is wrong.'
+    case 'idempotency_key_conflict':
+      return `Idempotency key reused with a different payload (409).`
+    default:
+      return `${err.status} ${err.code}${err.detail ? ` — ${err.detail}` : ''}`
+  }
+}
+
+type RequestOpts = {
+  method?: string
+  body?: unknown
+  token?: string | null
+  idempotencyKey?: string
+  signal?: AbortSignal
+}
+
+const BASE = import.meta.env.VITE_API_URL ?? '/api/v1'
+
+export async function apiRequest<T>(path: string, opts: RequestOpts = {}): Promise<T> {
+  const headers: Record<string, string> = { Accept: 'application/json' }
+  if (opts.body !== undefined) headers['Content-Type'] = 'application/json'
+  if (opts.token) headers.Authorization = `Bearer ${opts.token}`
+  if (opts.idempotencyKey) headers['Idempotency-Key'] = opts.idempotencyKey.slice(0, 64)
+
+  const res = await fetch(`${BASE}${path}`, {
+    method: opts.method ?? (opts.body !== undefined ? 'POST' : 'GET'),
+    headers,
+    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+    signal: opts.signal,
+  })
+
+  const text = await res.text()
+  let parsed: unknown = null
+  if (text) {
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      parsed = { error: 'invalid_json', detail: text.slice(0, 200) }
+    }
+  }
+
+  if (!res.ok) {
+    const body = (parsed ?? {}) as Record<string, unknown>
+    const { error, detail, ...rest } = body
+    throw new ApiError(
+      res.status,
+      String(error ?? 'error'),
+      typeof detail === 'string' ? detail : undefined,
+      rest,
+    )
+  }
+  return parsed as T
+}
+// ===== src/components/AppShell.tsx =====
+import { useQuery } from '@tanstack/react-query'
+import { NavLink, Outlet, useNavigate } from 'react-router-dom'
+import { api } from '../api/endpoints.ts'
+import { useAuth } from '../auth/AuthContext.tsx'
+import { navFor } from '../auth/rbac.ts'
+
+export function AppShell() {
+  const { user, token, logout } = useAuth()
+  const navigate = useNavigate()
+  const nav = navFor(user?.roles ?? [])
+  const reconQ = useQuery({
+    queryKey: ['recon', token],
+    queryFn: () => api.recon({ token }),
+    enabled: Boolean(token) && nav.finance,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+  })
+
+  return (
+    <div className="shell">
+      <aside className="sidebar">
+        <div className="brand">
+          <span className="brand-kicker">Northwind Traders</span>
+          <strong>Operations Console</strong>
+        </div>
+        <nav>
+          {nav.warehouse ? (
+            <NavLink to="/warehouse">Warehouse</NavLink>
+          ) : null}
+          {nav.procurement ? (
+            <NavLink to="/procurement">Procurement</NavLink>
+          ) : null}
+          {nav.sales ? <NavLink to="/sales">Sales</NavLink> : null}
+          {nav.finance ? <NavLink to="/finance">Finance</NavLink> : null}
+        </nav>
+        <div className="sidebar-foot">
+          <div className="who">
+            <div>{user?.name}</div>
+            <div className="muted">{user?.email}</div>
+            <div className="roles">{user?.roles.join(', ')}</div>
+          </div>
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => {
+              logout()
+              navigate('/login')
+            }}
+          >
+            Sign out
+          </button>
+        </div>
+      </aside>
+      <div className="main">
+        <header className="topbar">
+          <span className="muted">Source of truth: Stage 2 API · reload refetches · no mocked stock/ledger</span>
+          {nav.finance ? (
+            <span
+              className={`recon-chip ${reconQ.isLoading ? 'is-loading' : reconQ.isError ? 'is-fail' : reconQ.data?.reconciled ? 'is-ok' : 'is-bad'}`}
+              title="GET /api/v1/ledger/reconciliation"
+            >
+              {reconQ.isLoading
+                ? 'Recon…'
+                : reconQ.isError
+                  ? 'Recon unreachable'
+                  : `Ledger matches movements: ${reconQ.data?.reconciled ? 'YES' : 'NO'}`}
+            </span>
+          ) : (
+            <span className="muted">Recon hidden — this role cannot GET /ledger/reconciliation</span>
+          )}
+        </header>
+        <main className="content">
+          <Outlet />
+        </main>
+      </div>
+    </div>
+  )
+}
+// ===== backend src/services/reads.ts =====
+import type { Client } from '../db.js';
+import { getProductStock } from './inventory.js';
+
+/** Read-only aggregations so the operator console can reload from the DB. */
+
+export async function listPurchaseOrders(client: Client) {
+  const r = await client.query(
+    `SELECT id, po_number, supplier_name, status, total_amount::text, created_at
+     FROM purchase_orders
+     ORDER BY created_at DESC
+     LIMIT 200`
+  );
+  return { purchase_orders: r.rows };
+}
+
+export async function listSalesOrders(client: Client) {
+  const r = await client.query(
+    `SELECT id, so_number, customer_name, status, total_amount::text, created_at
+     FROM sales_orders
+     ORDER BY created_at DESC
+     LIMIT 200`
+  );
+  return { sales_orders: r.rows };
+}
+
+export async function listStockMovements(
+  client: Client,
+  warehouseId: string,
+  productId?: string
+) {
+  const r = await client.query(
+    `SELECT sm.id, sm.product_id, p.sku, p.name AS product_name,
+            sm.warehouse_id, sm.direction, sm.quantity::text, sm.unit_cost::text,
+            sm.reason, sm.reference_type, sm.reference_id, sm.journal_entry_id,
+            sm.created_at
+     FROM stock_movements sm
+     JOIN products p ON p.id = sm.product_id
+     WHERE sm.warehouse_id = $1
+       AND ($2::uuid IS NULL OR sm.product_id = $2)
+     ORDER BY sm.created_at DESC
+     LIMIT 300`,
+    [warehouseId, productId || null]
+  );
+  return { movements: r.rows };
+}
+
+export async function listJournalEntries(client: Client) {
+  const r = await client.query(
+    `SELECT je.id, je.entry_number, je.description, je.reference_type, je.reference_id,
+            je.posted_at,
+            COALESCE(SUM(jl.debit),0)::text AS total_debit,
+            COALESCE(SUM(jl.credit),0)::text AS total_credit
+     FROM journal_entries je
+     LEFT JOIN journal_lines jl ON jl.journal_entry_id = je.id
+     GROUP BY je.id
+     ORDER BY je.posted_at DESC
+     LIMIT 200`
+  );
+  return { journal_entries: r.rows };
+}
+
+/** Same numbers as GET /products/:id/stock, batched for the warehouse grid. */
+export async function warehouseSnapshot(client: Client, warehouseId: string) {
+  const products = await client.query(
+    `SELECT id, sku, name, unit, is_active FROM products WHERE is_active ORDER BY sku`
+  );
+  const rows = [];
+  for (const p of products.rows) {
+    const stock = await getProductStock(client, p.id, warehouseId);
+    rows.push({ ...p, ...stock });
+  }
+  return { warehouse_id: warehouseId, rows };
+}
+// ===== SalesPage CreateSO (refetch stock then POST) =====
+function CreateSO({
+  products,
+  warehouseId,
+  onCreated,
+}: {
+  products: Array<{ id: string; sku: string; name: string }>
+  warehouseId: string
+  onCreated: (id: string) => void
+}) {
+  const { token } = useAuth()
+  const [customer, setCustomer] = useState('Vins et alcools Chevalier')
+  const [productId, setProductId] = useState('')
+  const [quantity, setQuantity] = useState('1')
+  const [unitPrice, setUnitPrice] = useState('18')
+  const pid = productId || products[0]?.id || ''
+
+  const stockQ = useQuery({
+    queryKey: ['stock', token, pid, warehouseId],
+    queryFn: () => api.stock({ token }, pid, warehouseId),
+    enabled: Boolean(token && pid && warehouseId),
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+  })
+
+  const payload = useMemo(
+    () => ({
+      customer_name: customer,
+      warehouse_id: warehouseId,
+      lines: [{ product_id: pid, quantity, unit_price: unitPrice }],
+    }),
+    [customer, warehouseId, pid, quantity, unitPrice],
+  )
+  const idemp = useIdempotencyKey(payload)
+
+  const mut = useMutation({
+    mutationFn: async () => {
+      const fresh = await api.stock({ token }, pid, warehouseId)
+      return { fresh, so: await api.createSO({ token, idempotencyKey: idemp.key }, payload) }
+    },
+    onSuccess: (res) => {
+      idemp.rotate()
+      onCreated(res.so.id)
+    },
+  })
+
+  const avail = stockQ.data ? Number(stockQ.data.available_qty) : null
+  const want = Number(quantity)
+  const willBackorder = avail != null && want > avail && avail > 0
+  const will409 = avail === 0 && want > 0
+
+  return (
+    <form
+      className="panel"
+      onSubmit={(e) => {
+        e.preventDefault()
+        mut.mutate()
+      }}
+    >
+      <h2>Create sales order</h2>
+      {mut.error ? <ErrorBanner err={mut.error} /> : null}
+      {mut.data ? (
+        <p className="banner banner-ok">
+          Confirmed {mut.data.so.so_number}. Reserved {qty(mut.data.so.lines?.[0]?.reserved_qty)} · backordered{' '}
+          {qty(mut.data.so.lines?.[0]?.backordered_qty)}. Availability just before POST was{' '}
+          {qty(mut.data.fresh.available_qty)}.
+        </p>
+      ) : null}
+
+      <label>
+        Customer
+        <input value={customer} onChange={(e) => setCustomer(e.target.value)} required />
+      </label>
+      <label>
+        Product
+        <select value={pid} onChange={(e) => setProductId(e.target.value)}>
+          {products.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.sku} — {p.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <LiveAvailability stockQ={stockQ} />
+      <div className="row2">
+        <label>
+          Qty
+          <input value={quantity} onChange={(e) => setQuantity(e.target.value)} required />
+        </label>
+        <label>
+          Unit price
+          <input value={unitPrice} onChange={(e) => setUnitPrice(e.target.value)} required />
+        </label>
+      </div>
+      {willBackorder ? (
+        <p className="banner banner-info">
+          Ordered {want} &gt; available {avail}. Stage 2 will reserve {avail} and backorder {want - avail}. The UI does
+          not block this.
+        </p>
+      ) : null}
+      {will409 ? (
+        <p className="banner banner-error">
+          Available is 0. Confirm will POST anyway; Stage 2 should return 409 insufficient_stock.
+        </p>
+      ) : null}
+      <BusyButton type="submit" busy={mut.isPending} disabled={!pid || !warehouseId}>
+        Confirm & reserve
+      </BusyButton>
+
+      <SecondSession productId={pid} warehouseId={warehouseId} sku={products.find((p) => p.id === pid)?.sku} />
+    </form>
+  )
+}
+// ===== LiveAvailability GET /products/:id/stock =====
+function LiveAvailability({
+  stockQ,
+}: {
+  stockQ: {
+    data?: ProductStock
+    isFetching: boolean
+    isError: boolean
+    error: unknown
+    dataUpdatedAt: number
+    refetch: () => Promise<unknown>
+  }
+}) {
+  return (
+    <div className="live-box">
+      <div className="live-head">
+        <strong>Live availability</strong>
+        <button type="button" className="btn btn-ghost" onClick={() => void stockQ.refetch()}>
+          Revalidate now
+        </button>
+      </div>
+      <p className="muted">
+        GET /products/:id/stock · fetched {stockQ.dataUpdatedAt ? new Date(stockQ.dataUpdatedAt).toLocaleTimeString() : '—'}
+        {stockQ.isFetching ? ' · fetching…' : ''}
+      </p>
+      {stockQ.isError ? <ErrorBanner err={stockQ.error} onRetry={() => void stockQ.refetch()} /> : null}
+      {stockQ.data ? (
+        <dl className="kpi">
+          <div>
+            <dt>Physical</dt>
+            <dd>{qty(stockQ.data.physical_qty)}</dd>
+          </div>
+          <div>
+            <dt>Reserved</dt>
+            <dd>{qty(stockQ.data.reserved_qty)}</dd>
+          </div>
+          <div>
+            <dt>Available</dt>
+            <dd>{qty(stockQ.data.available_qty)}</dd>
+          </div>
+        </dl>
+      ) : (
+        <LoadingState label="Fetching stock…" />
+      )}
+    </div>
+  )
+}
+// ===== SecondSession second JWT =====
+function SecondSession({
+  productId,
+  warehouseId,
+  sku,
+}: {
+  productId: string
+  warehouseId: string
+  sku?: string
+}) {
+  const qc = useQueryClient()
+  const [email, setEmail] = useState('sales@northwind.local')
+  const password = 'password123'
+  const [session, setSession] = useState<LoginResponse | null>(null)
+  const [loginErr, setLoginErr] = useState<unknown>(null)
+  const [loggingIn, setLoggingIn] = useState(false)
+
+  const stockQ = useQuery({
+    queryKey: ['stock-b', session?.token, productId, warehouseId],
+    queryFn: () => api.stock({ token: session!.token }, productId, warehouseId),
+    enabled: Boolean(session && productId && warehouseId),
+    staleTime: 0,
+  })
+
+  const idemp = useIdempotencyKey({ sid: session?.user.id, productId, warehouseId })
+  const reserve = useMutation({
+    mutationFn: () =>
+      api.createSO(
+        { token: session!.token, idempotencyKey: idemp.key },
+        {
+          customer_name: `Session B ${session!.user.email}`,
+          warehouse_id: warehouseId,
+          lines: [{ product_id: productId, quantity: '1', unit_price: '18' }],
+        },
+      ),
+    onSuccess: () => {
+      idemp.rotate()
+      void qc.invalidateQueries({ queryKey: ['stock'] })
+      void qc.invalidateQueries({ queryKey: ['stock-b'] })
+      void qc.invalidateQueries({ queryKey: ['sos'] })
+      void qc.invalidateQueries({ queryKey: ['inventory'] })
+    },
+  })
+
+    // JSX: second JWT login + POST /sales-orders qty=1; invalidates [stock]
+}
+// ===== FinancePage recon indicator =====
+export function FinancePage() {
+  const { token, user } = useAuth()
+  const qc = useQueryClient()
+  const canReverse = canPost(user?.roles ?? [], POST.reverseJournal)
+  const [jeId, setJeId] = useState<string | null>(null)
+
+  const reconQ = useQuery({
+    queryKey: ['recon', token],
+    queryFn: () => api.recon({ token }),
+    enabled: Boolean(token),
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+  })
+  const listQ = useQuery({
+    queryKey: ['journals', token],
+    queryFn: () => api.listJournals({ token }),
+    enabled: Boolean(token),
+    staleTime: 0,
+  })
+  const detailQ = useQuery({
+    queryKey: ['journal', token, jeId],
+    queryFn: () => api.getJournal({ token }, jeId!),
+    enabled: Boolean(token && jeId),
+  })
+
+  return (
+    <section>
+      <header className="page-head">
+        <div>
+          <h1>Finance</h1>
+          <p className="muted">
+            Indicator is <code>GET /api/v1/ledger/reconciliation</code> — the console does not compute match/mismatch.
+          </p>
+        </div>
+        <button type="button" className="btn" onClick={() => void reconQ.refetch()}>
+          Refresh recon
+        </button>
+      </header>
+
+      {reconQ.isLoading ? <LoadingState label="Loading reconciliation…" /> : null}
+      {reconQ.error ? <ErrorBanner err={reconQ.error} onRetry={() => void reconQ.refetch()} /> : null}
+      {reconQ.data ? (
+        <div className={`recon-hero ${reconQ.data.reconciled ? 'is-ok' : 'is-bad'}`}>
+          <p className="recon-kicker">
+            GET /ledger/reconciliation · last fetch{' '}
+            {reconQ.dataUpdatedAt ? new Date(reconQ.dataUpdatedAt).toLocaleString('en-IN', { hour12: false }) : '—'}
+          </p>
+          <p className="recon-answer">
+            Ledger balance matches inventory movements:{' '}
+            <strong>{reconQ.data.reconciled ? 'YES' : 'NO'}</strong>
+          </p>
+          <dl className="kpi">
+            <div>
+              <dt>Movement carrying value</dt>
+              <dd>{inr(reconQ.data.derivation.movement_carrying_value)}</dd>
+            </div>
+            <div>
+              <dt>Ledger 1300</dt>
+              <dd>{inr(reconQ.data.derivation.ledger_inventory_1300)}</dd>
+            </div>
+            <div>
+              <dt>Difference</dt>
+              <dd>{inr(reconQ.data.derivation.difference)}</dd>
+            </div>
+            <div>
+              <dt>Physical qty (all WH)</dt>
+              <dd>{qty(reconQ.data.derivation.physical_qty_all_warehouses)}</dd>
+            </div>
+          </dl>
+          <p className="mono formula">{reconQ.data.formula}</p>
+          <p className="muted">{reconQ.data.on_failure}</p>
+        </div>
+      ) : null}

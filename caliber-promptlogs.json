@@ -1,0 +1,42 @@
+[
+  {
+    "tool": "Cursor Agent",
+    "promptText": "Inspect Stage 2 Mini-ERP backend (routes, RBAC, stock, recon, error codes) and the Frontend Operations Console brief. Do not invent APIs. Identify gaps vs warehouse/procurement/sales/finance requirements. Do not submit.",
+    "responseText": "Stage 2 has JWT login, requireRoles (auditor GET bypass, admin not god-mode), GET /products/:id/stock (physical/reserved/available), POST SO 409 insufficient_stock, GR 422 over_receipt, GET /ledger/reconciliation with reconciled+derivation+formula. Gaps that block reload-as-truth: no PO/SO/journal lists, no stock_movements GET, no CORS. Writes must stay on existing POSTs."
+  },
+  {
+    "tool": "Cursor Agent",
+    "promptText": "Add the minimum Stage 2-compatible read endpoints and CORS so the console can reload from Postgres without localStorage document IDs. Do not change reservation, over-receipt, or recon semantics.",
+    "responseText": "Added cors origin:true; GET /inventory (getProductStock per SKU); GET /stock-movements; GET /purchase-orders; GET /sales-orders; GET /ledger/journal-entries; PO detail now includes goods_receipts; SO detail returns warehouse_id from reservations. New backend test: sales 403 on PO list and recon; lists populate after GR/SO."
+  },
+  {
+    "tool": "Cursor Agent",
+    "promptText": "Build the Vite React TS operations console against the live API: Warehouse, Procurement (partial GR + outstanding), Sales (live stock), Finance (recon indicator). Full loading/empty/error/403/409/422 states. Duplicate-submit guard + Idempotency-Key.",
+    "responseText": "Console at /home/user/mini-erp-frontend. React Query staleTime 0. apiRequest parses {error,detail,...extra} into ApiError. operatorMessage handles insufficient_stock, over_receipt, forbidden. BusyButton + 32-char idempotency keys on GR/SO/fulfill/adjust."
+  },
+  {
+    "tool": "Cursor Agent",
+    "promptText": "Sales availability must be live GET /products/:id/stock, not local state. Demonstrate another session reserving and session A revalidating. Do not client-block qty>available because Stage 2 partial-reserves and 409s only when reserved=0.",
+    "responseText": "CreateSO uses stock query staleTime 0, refetch on focus, Revalidate button, refetch immediately before POST. Warns backorder vs 409 but still POSTs. Second session stores a separate JWT and POSTs SO qty=1 then invalidates ['stock']. operator-flow: available_after=0, next SO 409."
+  },
+  {
+    "tool": "Cursor Agent",
+    "promptText": "Mirror Stage 2 RBAC in nav and actions. Demo sales vs warehouse with different surfaces. Hitting /finance as sales must show API 403, not a fake empty ledger.",
+    "responseText": "canGet/canPost copy requireRoles. Sales nav: Warehouse+Sales. Warehouse: +Procurement, no Finance. Finance: all four. /finance as sales renders 403 requires one of: finance, auditor, admin. Warehouse cannot POST POs (banner + 403). Admin writes still false."
+  },
+  {
+    "tool": "Cursor Agent",
+    "promptText": "Finance indicator must display GET /ledger/reconciliation as-is (YES/NO, movement value, 1300, difference, formula). No frontend-computed match.",
+    "responseText": "Finance hero and topbar chip bind reconciled and derivation from the recon endpoint, including loading and 403/5xx. Browser as finance: Ledger matches movements YES, ₹50=₹50, formula string from API. Sales topbar: Recon hidden."
+  },
+  {
+    "tool": "Cursor Agent",
+    "promptText": "Run backend tests, frontend tsc/vitest/build, live operator-flow against :3100, and browser-verify all four views plus two roles. Fix anything found. Do not submit to Caliber.",
+    "responseText": "Fixed getPurchaseOrder goods_receipts missing $1 bind (over-receipt GET 500). Backend 7/7. Frontend 7 tests, tsc+build OK. operator-flow OK (outstanding 4, 422, 409, recon true). Browser: sales/warehouse/finance nav differences, /finance 403, PO outstanding 6/4, recon YES."
+  },
+  {
+    "tool": "Cursor Agent",
+    "promptText": "Prepare the local Caliber payload (answer + curated code ≤20k + prompt logs). Self-audit vs every objective. Do not call caliber_submit.",
+    "responseText": "caliber-answer.txt from NOTES.md; caliber-code.txt ~19.5k (rbac, http, AppShell, reads.ts, CreateSO/live stock/second JWT, recon indicator). Prompt logs are this thread. Remaining: no public frontend repo yet; Stage 2 still will not auto-reserve later GRs onto existing backorders (documented, not faked)."
+  }
+]
