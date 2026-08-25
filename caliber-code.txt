@@ -166,16 +166,9 @@ export async function apiRequest<T>(path: string, opts: RequestOpts = {}): Promi
   }
   return parsed as T
 }
-// ===== src/components/AppShell.tsx =====
-import { useQuery } from '@tanstack/react-query'
-import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { api } from '../api/endpoints.ts'
-import { useAuth } from '../auth/AuthContext.tsx'
-import { navFor } from '../auth/rbac.ts'
-
+// ===== AppShell nav + recon chip =====
 export function AppShell() {
-  const { user, token, logout } = useAuth()
-  const navigate = useNavigate()
+  const { user, token } = useAuth()
   const nav = navFor(user?.roles ?? [])
   const reconQ = useQuery({
     queryKey: ['recon', token],
@@ -184,129 +177,27 @@ export function AppShell() {
     staleTime: 0,
     refetchOnWindowFocus: true,
   })
-
   return (
     <div className="shell">
-      <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-kicker">Northwind Traders</span>
-          <strong>Operations Console</strong>
-        </div>
-        <nav>
-          {nav.warehouse ? (
-            <NavLink to="/warehouse">Warehouse</NavLink>
-          ) : null}
-          {nav.procurement ? (
-            <NavLink to="/procurement">Procurement</NavLink>
-          ) : null}
-          {nav.sales ? <NavLink to="/sales">Sales</NavLink> : null}
-          {nav.finance ? <NavLink to="/finance">Finance</NavLink> : null}
-        </nav>
-        <div className="sidebar-foot">
-          <div className="who">
-            <div>{user?.name}</div>
-            <div className="muted">{user?.email}</div>
-            <div className="roles">{user?.roles.join(', ')}</div>
-          </div>
-          <button
-            type="button"
-            className="btn btn-ghost"
-            onClick={() => {
-              logout()
-              navigate('/login')
-            }}
-          >
-            Sign out
-          </button>
-        </div>
-      </aside>
-      <div className="main">
-        <header className="topbar">
-          <span className="muted">Source of truth: Stage 2 API · reload refetches · no mocked stock/ledger</span>
-          {nav.finance ? (
-            <span
-              className={`recon-chip ${reconQ.isLoading ? 'is-loading' : reconQ.isError ? 'is-fail' : reconQ.data?.reconciled ? 'is-ok' : 'is-bad'}`}
-              title="GET /api/v1/ledger/reconciliation"
-            >
-              {reconQ.isLoading
-                ? 'Recon…'
-                : reconQ.isError
-                  ? 'Recon unreachable'
-                  : `Ledger matches movements: ${reconQ.data?.reconciled ? 'YES' : 'NO'}`}
-            </span>
-          ) : (
-            <span className="muted">Recon hidden — this role cannot GET /ledger/reconciliation</span>
-          )}
-        </header>
-        <main className="content">
-          <Outlet />
-        </main>
-      </div>
+      <nav>
+        {nav.warehouse ? <NavLink to="/warehouse">Warehouse</NavLink> : null}
+        {nav.procurement ? <NavLink to="/procurement">Procurement</NavLink> : null}
+        {nav.sales ? <NavLink to="/sales">Sales</NavLink> : null}
+        {nav.finance ? <NavLink to="/finance">Finance</NavLink> : null}
+      </nav>
+      {nav.finance ? (
+        <span className={`recon-chip ${reconQ.data?.reconciled ? 'is-ok' : 'is-bad'}`}>
+          {reconQ.isLoading ? 'Recon…' : reconQ.isError ? 'Recon unreachable'
+            : `Ledger matches movements: ${reconQ.data?.reconciled ? 'YES' : 'NO'}`}
+        </span>
+      ) : (
+        <span>Recon hidden — this role cannot GET /ledger/reconciliation</span>
+      )}
+      <Outlet />
     </div>
   )
 }
-// ===== backend src/services/reads.ts (lists/history only) =====
-import type { Client } from '../db.js';
-import { getProductStock } from './inventory.js';
-
-/** Read-only aggregations so the operator console can reload from the DB. */
-
-export async function listPurchaseOrders(client: Client) {
-  const r = await client.query(
-    `SELECT id, po_number, supplier_name, status, total_amount::text, created_at
-     FROM purchase_orders
-     ORDER BY created_at DESC
-     LIMIT 200`
-  );
-  return { purchase_orders: r.rows };
-}
-
-export async function listSalesOrders(client: Client) {
-  const r = await client.query(
-    `SELECT id, so_number, customer_name, status, total_amount::text, created_at
-     FROM sales_orders
-     ORDER BY created_at DESC
-     LIMIT 200`
-  );
-  return { sales_orders: r.rows };
-}
-
-export async function listStockMovements(
-  client: Client,
-  warehouseId: string,
-  productId?: string
-) {
-  const r = await client.query(
-    `SELECT sm.id, sm.product_id, p.sku, p.name AS product_name,
-            sm.warehouse_id, sm.direction, sm.quantity::text, sm.unit_cost::text,
-            sm.reason, sm.reference_type, sm.reference_id, sm.journal_entry_id,
-            sm.created_at
-     FROM stock_movements sm
-     JOIN products p ON p.id = sm.product_id
-     WHERE sm.warehouse_id = $1
-       AND ($2::uuid IS NULL OR sm.product_id = $2)
-     ORDER BY sm.created_at DESC
-     LIMIT 300`,
-    [warehouseId, productId || null]
-  );
-  return { movements: r.rows };
-}
-
-export async function listJournalEntries(client: Client) {
-  const r = await client.query(
-    `SELECT je.id, je.entry_number, je.description, je.reference_type, je.reference_id,
-            je.posted_at,
-            COALESCE(SUM(jl.debit),0)::text AS total_debit,
-            COALESCE(SUM(jl.credit),0)::text AS total_credit
-     FROM journal_entries je
-     LEFT JOIN journal_lines jl ON jl.journal_entry_id = je.id
-     GROUP BY je.id
-     ORDER BY je.posted_at DESC
-     LIMIT 200`
-  );
-  return { journal_entries: r.rows };
-}
-// ===== WarehousePage stock grid (original Stage 2 stock GET) =====
+// ===== WarehousePage stock grid (GET /products/:id/stock) =====
   const productsQ = useQuery({
     queryKey: ['products', token],
     queryFn: () => api.products({ token }),
@@ -492,6 +383,118 @@ function LiveAvailability({
       )}
     </div>
   )
+}
+// ===== SecondSession second JWT POST /sales-orders =====
+function SecondSession({
+  productId,
+  warehouseId,
+  sku,
+}: {
+  productId: string
+  warehouseId: string
+  sku?: string
+}) {
+  const qc = useQueryClient()
+  const [email, setEmail] = useState('sales@northwind.local')
+  const password = 'password123'
+  const [session, setSession] = useState<LoginResponse | null>(null)
+  const [loginErr, setLoginErr] = useState<unknown>(null)
+  const [loggingIn, setLoggingIn] = useState(false)
+
+  const stockQ = useQuery({
+    queryKey: ['stock-b', session?.token, productId, warehouseId],
+    queryFn: () => api.stock({ token: session!.token }, productId, warehouseId),
+    enabled: Boolean(session && productId && warehouseId),
+    staleTime: 0,
+  })
+
+  const idemp = useIdempotencyKey({ sid: session?.user.id, productId, warehouseId })
+  const reserve = useMutation({
+    mutationFn: () =>
+      api.createSO(
+        { token: session!.token, idempotencyKey: idemp.key },
+        {
+          customer_name: `Session B ${session!.user.email}`,
+          warehouse_id: warehouseId,
+          lines: [{ product_id: productId, quantity: '1', unit_price: '18' }],
+        },
+      ),
+    onSuccess: () => {
+      idemp.rotate()
+      void qc.invalidateQueries({ queryKey: ['stock'] })
+      void qc.invalidateQueries({ queryKey: ['stock-b'] })
+      void qc.invalidateQueries({ queryKey: ['sos'] })
+      void qc.invalidateQueries({ queryKey: ['inventory'] })
+    },
+  })
+
+  return (
+    <details className="second-session">
+      <summary>Second session (concurrent reservation)</summary>
+      <p className="muted">
+        Separate JWT. Reserving 1 × {sku ?? 'SKU'} here hits POST /sales-orders as this user. Then Revalidate on
+        session A — or use a second browser window as sales and focus this tab. Not a local decrement.
+      </p>
+      {loginErr ? <ErrorBanner err={loginErr} /> : null}
+      {!session ? (
+        <div className="row2">
+          <input value={email} onChange={(e) => setEmail(e.target.value)} aria-label="Second session email" />
+          <BusyButton
+            type="button"
+            busy={loggingIn}
+            onClick={() => {
+              setLoggingIn(true)
+              setLoginErr(null)
+              api
+                .login(email, password)
+                .then((res) => setSession(res))
+                .catch((e) => setLoginErr(e))
+                .finally(() => setLoggingIn(false))
+            }}
+          >
+            Login session B
+          </BusyButton>
+        </div>
+      ) : (
+        <>
+          <p>
+            B: {session.user.email} ({session.user.roles.join(', ')}) · available {qty(stockQ.data?.available_qty)}
+          </p>
+          {reserve.error ? <ErrorBanner err={reserve.error} /> : null}
+          {reserve.data ? (
+            <p className="banner banner-ok">
+              Session B reserved {qty(reserve.data.lines?.[0]?.reserved_qty)} on {reserve.data.so_number}.
+            </p>
+          ) : null}
+          {reserve.error instanceof ApiError && reserve.error.status === 403 ? (
+            <p className="muted">Session B is not sales — POST correctly forbidden.</p>
+          ) : null}
+          <BusyButton
+            type="button"
+            busy={reserve.isPending}
+            disabled={session.user.roles.includes('sales') === false}
+            onClick={() => reserve.mutate()}
+          >
+            Reserve 1 unit as session B
+          </BusyButton>
+        </>
+      )}
+    </details>
+  )
+}
+// ===== Procurement GRForm (no client clamp) =====
+function GRForm({ poId, warehouseId, lines, onDone }) {
+  const defaults = Object.fromEntries(lines.map((l) => [l.id, String(Number(l.outstanding_qty))]))
+  const [qtys, setQtys] = useState(defaults)
+  const payload = {
+    warehouse_id: warehouseId,
+    lines: lines.map((l) => ({ po_line_id: l.id, quantity: qtys[l.id] ?? '0' })).filter((l) => Number(l.quantity) > 0),
+  }
+  const idemp = useIdempotencyKey(payload)
+  const mut = useMutation({
+    mutationFn: () => api.goodsReceipt({ token, idempotencyKey: idemp.key }, poId, payload),
+    // qty > outstanding is POSTed; Stage 2 422 over_receipt — UI does not clamp
+  })
 }
 // ===== FinancePage recon indicator =====
 export function FinancePage() {

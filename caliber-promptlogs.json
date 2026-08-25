@@ -6,8 +6,8 @@
   },
   {
     "tool": "Cursor Agent",
-    "promptText": "Add the minimum Stage 2-compatible read endpoints and CORS so the console can reload from Postgres without localStorage document IDs. Do not change reservation, over-receipt, or recon semantics.",
-    "responseText": "Added cors origin:true; GET /inventory (getProductStock per SKU); GET /stock-movements; GET /purchase-orders; GET /sales-orders; GET /ledger/journal-entries; PO detail now includes goods_receipts; SO detail returns warehouse_id from reservations. New backend test: sales 403 on PO list and recon; lists populate after GR/SO."
+    "promptText": "Add the minimum Stage 2-compatible read endpoints and CORS so the console can reload from Postgres without localStorage document IDs. Do not change reservation, over-receipt, or recon semantics. Warehouse levels must stay on original GET /products/:id/stock — do not make a new snapshot the source of truth.",
+    "responseText": "Added cors origin:true and read-only GET /purchase-orders, /sales-orders, /stock-movements, /ledger/journal-entries. Warehouse levels stay on GET /products + GET /products/:id/stock (a GET /inventory helper exists on the API but the console does not use it). PO detail includes goods_receipts; SO detail returns warehouse_id from reservations. Backend test: sales 403 on PO list and recon."
   },
   {
     "tool": "Cursor Agent",

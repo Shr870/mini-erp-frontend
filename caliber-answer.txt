@@ -73,3 +73,5 @@ cd /home/user/mini-erp-frontend && npm run dev   # :5173
 npm test                  # RBAC matrix + error mapping
 node scripts/operator-flow.mjs   # live GR / 409 / recon against :3100
 ```
+
+Live against `:3100` (25 Aug 2026): `operator-flow OK { outstanding: '4.0000', reserved: '6.0000', backordered: '94.0000', available_after: '0.0000', reconciled: true, movement_value: '80.00000000', ledger_1300: '80.0000' }`. Frontend vitest 7/7; backend 7/7.
